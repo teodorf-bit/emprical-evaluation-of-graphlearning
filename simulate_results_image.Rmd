@@ -1,0 +1,446 @@
+---
+title: "redo-journal1"
+output: html_document
+date: "2024-06-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Clear the R enviorment
+```{r}
+rm(list = ls())
+```
+
+
+## Packages
+Import all the relevant packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(kableExtra)
+library(stringr)
+library(rstan)
+library(patchwork)
+library(gtools)
+library(posterior)
+library(cmdstanr)
+seed <- 20200331
+set.seed(seed)
+```
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/teodor/Desktop/projects/papers/journal1/code/')
+```
+
+```{r cars}
+source("utils.R")
+```
+
+## Import dataset
+```{r}
+dataset <- readr::read_csv("results/full_data.csv") %>%
+  dplyr::filter(task=="image")
+
+dataset %>% sample_n(10) %>% kable(
+    "latex", 
+    table.envir = 'table',
+    caption='Sample of the generated dataset', 
+    booktabs=T,
+    label='dataset_sample',
+    format.args = list(scientific = FALSE), 
+    digits = 3,
+    linesep = "") %>% 
+    kable_styling(latex_options = c("hold_position"),
+                  full_width = F)
+```
+## Summary statistics for the error rate
+```{r}
+dataset%>% 
+  dplyr::group_by(algorithm) %>% 
+  summarise("Median" = median(accuracy),
+            "5%" = quantile(accuracy, 0.05),
+            "95%" = quantile(accuracy, 0.95),
+            "Range" = quantile(accuracy, 0.95) - quantile(accuracy, 0.05)) %>% 
+  dplyr::ungroup() %>% 
+  kable(
+        "latex", 
+        table.envir = 'table',
+        caption='Summary statistics for the error rate (image data)', 
+        booktabs=T,
+        label='image',
+        format.args = list(scientific = FALSE), 
+        digits = 3,
+        linesep = "") %>% 
+    kable_styling(latex_options = c("hold_position"),
+                  full_width = F) %>% 
+    readr::write_lines('summarystatisticstable-accuracy-image.tex')
+```
+
+## Summary statistics but as boxplots
+```{r}
+p<-ggplot(data=dataset, aes(x=algorithm, y=accuracy, fill=algorithm))+
+  geom_boxplot()+
+  theme(axis.text.x = element_blank())+ #remove the x labels
+  labs(title = 'accuracy (all datasets)')
+pdf("boxplots-accuracy-image.pdf")
+#png("boxplots-accuracy-image.png")
+p
+
+```
+## Widen dataset, in addition we remove the task column
+```{r}
+data_wide <- dataset %>% pivot_wider(names_from = dataset, values_from = accuracy)
+```
+
+```{r}
+dataset %>% 
+  dplyr::group_by(algorithm) %>% 
+  summarise("Median" = median(accuracy),
+            "5%" = quantile(accuracy, 0.05),
+            "95%" = quantile(accuracy, 0.95),
+            "Range" = quantile(accuracy, 0.95) - quantile(accuracy, 0.05)) %>% 
+  dplyr::ungroup() %>% 
+  kable(
+        "latex", 
+        table.envir = 'table',
+        caption='Summary statistics for the accuracy (image data)', 
+        booktabs=T,
+        label='summarystatisticstable-image',
+        format.args = list(scientific = FALSE), 
+        digits = 3,
+        linesep = "") %>% 
+    kable_styling(latex_options = c("hold_position"),
+                  full_width = F) %>% 
+    readr::write_lines('summarystatisticstable-image.tex')
+```
+## Prepare data for analysis
+```{r}
+dagg <- dataset %>% 
+  dplyr::filter(seed<=3) %>% # Minimial amount of successful trials
+  #dplyr::select(-`...1`) %>%
+  dplyr::group_by(seed) %>%
+  dplyr::mutate(Rank=rank(accuracy, ties.method = "random")) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-accuracy) #%>%
+  #tidyr::pivot_wider(names_from = algorithm,
+  #                   values_from = Rank)
+
+dagg <- dagg %>% pivot_wider(names_from = algorithm, values_from = Rank) %>% drop_na()
+```
+
+```{r}
+algorithms <- get_index_names_as_array(dataset$algorithm)
+n_algorithms <- length(algorithms)
+comb <- gtools::combinations(n=n_algorithms, r=2, v=seq(1:n_algorithms), repeats.allowed = F)
+```
+
+```{r}
+pb <- progress::progress_bar$new(format = "[:bar] :current/:total (:percent)", total = nrow(dagg))
+
+df_out <-  dplyr::tribble(~algo0_name, ~algo0, ~algo1_name, ~algo1, ~y, ~seed, ~dataset)
+
+for(i in 1:nrow(dagg))
+{
+  current_row <- dagg[i,]
+  for(j in 1:nrow(comb)){
+    comb_row <- comb[j,]
+    
+    algo0_name <- algorithms[comb_row[1]]
+    algo0 <- comb_row[1]
+    algo0_rank <- current_row[[1,algo0_name]]
+    
+    algo1_name <- algorithms[comb_row[2]]
+    algo1 <- comb_row[2]
+    algo1_rank <- current_row[[1,algo1_name]]
+    
+    diff_rank <- algo1_rank - algo0_rank
+    y <- ifelse(diff_rank<=0, 1, 0) 
+    
+    df_out <- add_row(df_out,
+                      algo0_name=algo0_name,
+                      algo0=algo0,
+                      algo1_name=algo1_name,
+                      algo1=algo1,
+                      y=y,
+                      seed=current_row$seed,
+                      dataset=current_row$dataset)
+    
+  }
+  pb$tick()
+}
+saveRDS(df_out, file="./ranking-image.RDS")
+```
+
+```{r pressure, echo=FALSE}
+df_out <- readRDS("./ranking-image.RDS")
+df_out$numLabId <- create_index(df_out$dataset)
+benchmarks <- get_index_names_as_array(df_out$dataset)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+df_table<-df_out %>% select(-seed)
+```
+Create the standata
+```{r}
+standata <- list(
+  N_total=nrow(df_out),
+  y = as.integer(df_out$y),
+  N_algorithm = as.integer(n_algorithms),
+  algo0=as.integer(df_out$algo0),
+  algo1=as.integer(df_out$algo1),
+  bm_id=df_out$numLabId,
+  N_bm=length(benchmarks)
+)
+saveRDS(standata, file = "./rankingmodel-data-image.RDS")
+```
+CmdStanR
+```{r}
+standata<-readRDS("./rankingmodel-data-image.RDS")
+
+library(cmdstanr)
+cmdstanr::set_cmdstan_path("/home/teodor/.cmdstan/cmdstan-2.35.0")
+file <- file.path(cmdstanr::cmdstan_path(), "rankingmodel_withcluster.stan")
+mod <- cmdstanr::cmdstan_model(file)
+
+ranking.fit <- mod$sample(
+  data = standata,
+  seed = 123,
+  chains = 4,
+  iter_warmup = 200,
+  iter_sampling = 2000,
+  parallel_chains = 4,
+  refresh = 500
+)
+saveRDS(ranking.fit, file = "./ranking-fit-image.RDS")
+ranking.fit$save_object(file = "./ranking-fit-image.RDS")
+
+```
+Read in the fitted data
+```{r}
+ranking.fit <-readRDS("./ranking-fit-image.RDS")
+np <- bayesplot::nuts_params(ranking.fit)
+a_alg <- c("a_alg[1]",
+           "a_alg[2]",
+           "a_alg[3]",
+           "a_alg[4]",
+           "a_alg[5]",
+           "a_alg[6]",
+           "a_alg[7]",
+           "a_alg[8]",
+           "a_alg[9]",
+           "a_alg[10]",
+           "a_alg[11]",
+           "a_alg[12]",
+           "a_alg[13]"
+)
+draws_a <- posterior::as_draws(ranking.fit$draws(variables = a_alg, format = "draws_df"))
+```
+
+Summary statistics
+```{r}
+options(pillar.sigfig = 3)
+summary_ranking.fit <- ranking.fit$summary(variables = a_alg) %>%
+  dplyr::rename(Variable = variable, Rhat = rhat) %>%
+  dplyr::select(-mean, -median,-sd,-mad,-q5,-q95 )%>% 
+  kable(
+      "latex", 
+      table.envir = 'table',
+      caption='Diagnostics for the posterior ranks (image data)', 
+      booktabs=T,
+      label='tab:diagnostics-image',
+      format.args = list(scientific = FALSE), 
+      digits = 3,
+      linesep = "") %>% 
+  kable_styling(latex_options = c("hold_position"),
+                full_width = F) %>% 
+  readr::write_lines('diagnostics-image.tex')
+```
+
+Statistical Analysis
+```{r}
+
+p_trace <- bayesplot::mcmc_trace(draws_a, pars=a_alg)
+#pdf("traceplots-10.pdf")
+png("traceplots-image.png")
+p_trace
+```
+
+Scatterplots
+```{r}
+#p_mcmc_scatter <- bayesplot::mcmc_scatter(ranking.fit$draws(variables = c("a_alg[1]","a_alg[2]"),format = "draws_df"))
+```
+
+Scatterplots mcmc_pairs instead of mcmc:scatter.
+```{r}
+# draws_a_1 <- posterior::as_draws(ranking.fit$draws(variables = c("a_alg[1]","a_alg[2]","a_alg[3]"), format = "draws_df"))
+# draws_a_2 <- posterior::as_draws(ranking.fit$draws(variables = c("a_alg[4]","a_alg[5]","a_alg[6]"), format = "draws_df"))
+# draws_a_3 <- posterior::as_draws(ranking.fit$draws(variables = c("a_alg[7]","a_alg[8]","a_alg[9]"), format = "draws_df"))
+# draws_a_4 <- posterior::as_draws(ranking.fit$draws(variables = c("a_alg[10]","a_alg[11]","a_alg[12]"), format = "draws_df"))
+# draws_a_5 <- posterior::as_draws(ranking.fit$draws(variables = c("a_alg[12]","a_alg[13]"), format = "draws_df"))
+# 
+# 
+# 
+# 
+# p_mcmc_pairs_1 <- bayesplot::mcmc_pairs(draws_a_1, np=np)
+# p_mcmc_pairs_2 <- bayesplot::mcmc_pairs(draws_a_2, np=np)
+# p_mcmc_pairs_3 <- bayesplot::mcmc_pairs(draws_a_3, np=np)
+# p_mcmc_pairs_4 <- bayesplot::mcmc_pairs(draws_a_4, np=np)
+# p_mcmc_pairs_5 <- bayesplot::mcmc_pairs(draws_a_5, np=np)
+# pdf("scatter-image.pdf")
+# 
+# 
+# p_mcmc_pairs_1
+# p_mcmc_pairs_2
+# p_mcmc_pairs_3
+# p_mcmc_pairs_4
+# p_mcmc_pairs_5
+```
+
+```{r}
+y <- df_out$y
+y_rep <- posterior::as_draws(ranking.fit$draws(variables = "y_rep", format = "draws_df"))
+y_rep <- y_rep[,1:length(y)]
+
+y_sim <- posterior::as_draws(ranking.fit$draws(variables = "y_sim", format = "draws_df"))
+y_sim <- y_sim[,1:length(y)]
+#library(shinystan)
+#launch_shinystan(ranking.fit)
+```
+
+Parplots
+```{r}
+# p_parcoord <- bayesplot::mcmc_parcoord(draws_a)
+# #pdf("parcoord-image.pdf")
+# png("parcoord-image.png")
+# p_parcoord
+```
+Kernel density estimates
+```{r}
+# p_dense_overlay <-bayesplot::ppc_dens_overlay(y,as.matrix(y_rep))
+# #pdf("dense_overlay-image.pdf")
+# png("dense_overlay-image.png")
+# p_dense_overlay
+```
+Hisograms of skew(y_rep)
+
+ ```{r}
+# p_ppc_stat <- bayesplot::ppc_stat(y, as.matrix(y_rep), binwidth = 0.005)
+# #pdf('stat-image.pdf')
+# png("stat-image.png")
+# p_ppc_stat
+```
+## Results
+
+```{r}
+p_mcmc_intervals<-bayesplot::mcmc_intervals(draws_a) +
+  scale_y_discrete(labels=algorithms)+
+  labs(x='Estimate',
+       y='Algorithm',
+       title='Strength parameters')
+#pdf('strength-image.pdf')
+png("strength-image.png")
+p_mcmc_intervals
+```
+POSTERIOR PREDICTIVE CHECKS
+
+Posterior distribution of a_alg
+```{r}
+draws_a <- draws_a %>% dplyr::rename(centeredkernel=`a_alg[1]`,
+                          laplace=`a_alg[2]`,
+                          "mean_shifted_laplace"=`a_alg[3]`,
+                          poisson=`a_alg[4]`,
+                          poisson2=a_alg[5],
+                          poissonbalanced=a_alg[6],
+                          poissonmbo=`a_alg[7]`,
+                          poissonmbo_old=`a_alg[8]`,
+                          poissonmbobalanced=a_alg[9],
+                          poissonvolume=`a_alg[10]`,
+                          randomwalk=`a_alg[11]`,
+                          sparselabelpropagation=`a_alg[12]`,
+                          wnll=`a_alg[13]`
+                          )
+p_areas<-bayesplot::mcmc_areas(draws_a, prob = 0.8)
+#pdf('posterior-strength-parameters-image.pdf')
+png("posterior-strength-parameters-image.png")
+p_areas
+```
+
+```{r}
+# p_bars <- bayesplot::ppc_bars(y=y,yrep=as.matrix(y_rep))
+# #pdf('posterior-predictive-check-boxplot-image.pdf')
+# png("posterior-predictive-check-boxplot-image.png")
+# p_bars
+```
+
+```{r}
+p_bars_grouped <- bayesplot::ppc_stat_grouped(y=y, yrep=as.matrix(y_rep), group=df_out$algo0_name, binwidth = 0.005)
+png("posterior-parameters-grouped-image.png")
+p_bars_grouped
+
+```
+
+```{r}
+p_bars_grouped_prior <- bayesplot::ppc_stat_grouped(y=y, yrep=as.matrix(y_sim), group=df_out$algo0_name, binwidth = 0.005)
+png("prior-parameters-grouped-image.png")
+p_bars_grouped_prior
+
+```
+
+````{r}
+# p_rootogram <- bayesplot::ppc_rootogram(y=y,yrep=as.matrix(y_rep))
+# #pdf('posterior-predictive-check-rootogram-image.pdf')
+# png("posterior-predictive-check-rootogran.image.png")
+# p_rootogram
+
+```
+ 
+
+
+Here we are extracting all samples and ranking them to have a distribution of the ranks
+```{r}
+posterior_df <- as.data.frame(posterior::as_draws_df(ranking.fit$draws(variables = a_alg)))[,1:n_algorithms]
+colnames(posterior_df) <- algorithms
+#sampling from the posterior
+s <- dplyr::sample_n(posterior_df, size = 1000, replace=T)
+s <- dplyr::mutate(s, rown = row_number())
+wide_s <- tidyr::pivot_longer(s, cols=all_of(algorithms), names_to = "Algorithms", values_to = "a_alg")
+
+rank_df <- wide_s %>% 
+  dplyr::group_by(rown) %>% 
+  dplyr::mutate(Rank = rank(-a_alg, ties.method = 'random')) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(-a_alg) %>% 
+  dplyr::group_by(Algorithms) %>% 
+  dplyr::summarise(MedianRank = median(Rank),
+                   VarianceRank = var(Rank)) %>% 
+  dplyr::arrange(MedianRank)
+```
+
+```{r}
+rank_df_table <- rank_df
+colnames(rank_df_table) <- c("Models","Median Rank", "Variance of the Rank")
+kable(rank_df_table, "html") %>% 
+  kable_styling(bootstrap_options = c('striped',"hover", "condensed" ))
+```
+saving the table to latex
+```{r}
+rank_df_table %>% 
+  kable(
+      "latex", 
+      table.envir = 'table',
+      caption='Ranking of the algorithms (image data)', 
+      booktabs=T,
+      label='rankingimage',
+      format.args = list(scientific = FALSE), 
+      digits = 3,
+      linesep = "") %>% 
+  kable_styling(latex_options = c("hold_position"),
+                full_width = F) %>% 
+  readr::write_lines('ranking-image.tex')
+```

@@ -1,0 +1,371 @@
+---
+title: "USB results"
+output: html_document
+date: "2023-08-23"
+---
+Clear the R enviorment
+```{r}
+rm(list = ls())
+```
+
+
+## Packages
+Import all the relevant packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(kableExtra)
+library(stringr)
+library(rstan)
+library(patchwork)
+library(gtools)
+library(posterior)
+library(cmdstanr)
+seed <- 20200331
+set.seed(seed)
+```
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/teodor/Desktop/projects/papers/journal1/code/')
+```
+
+```{r cars}
+source("utils.R")
+```
+
+```{r}
+dataset <- readr::read_csv("results/full_data_noise.csv") %>% dplyr::filter(task=="text")
+
+dataset %>% sample_n(10) %>% kable(
+    "latex", 
+    table.envir = 'table',
+    caption='Sample of the generated dataset', 
+    booktabs=T,
+    label='dataset_sample',
+    format.args = list(scientific = FALSE), 
+    digits = 3,
+    linesep = "") %>% 
+    kable_styling(latex_options = c("hold_position"),
+                  full_width = F) 
+```
+
+```{r}
+
+bm <- get_index_names_as_array(dataset$dataset)
+algorithms <- get_index_names_as_array(dataset$algorithm)
+```
+
+## 
+
+```{r}
+y <- ifelse(dataset$accuracy>90,1,0)
+
+dataset<-dataset %>% 
+  dplyr::mutate(y=y) %>%
+  dplyr::group_by(algorithm, dataset, SD) %>%
+  dplyr::summarise(
+    solvedAt90=sum(y),
+    N=n()) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(algorithmID=create_index(algorithm),
+                datasetID=create_index(dataset)) %>%
+  dplyr::select(algorithm, algorithmID, dataset, datasetID, SD, N, y=solvedAt90)
+```
+
+Lets preview a sample of the data set
+```{r}
+kable(dplyr::sample_n(dataset,size=10),"html", booktabs=T, format.args = list(scientific = FALSE), digits = 3) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>% 
+  kableExtra::scroll_box(width = "100%")
+```
+
+
+```{r include=F}
+saveRDS(dplyr::sample_n(dataset,size=4),'./probsuccessmodeldata.RDS')
+```
+
+```{r}
+standata <- list(
+  N_total = nrow(dataset),
+  y = dataset$y,
+  N_draw = dataset$N,
+  x_noise = dataset$SD,
+  N_algorithm = length(algorithms),
+  algorithm_id = dataset$algorithmID,
+  N_bm  = length(bm),
+  bm_id = dataset$datasetID
+)
+saveRDS(standata,file="./probsuccess-data.RDS")
+```
+
+```{r}
+standata<-readRDS("./probsuccess-data.RDS")
+
+cmdstanr::set_cmdstan_path("/home/teodor/.cmdstan/cmdstan-2.35.0")
+file <- file.path(cmdstanr::cmdstan_path(), "probsuccess-cv.stan")
+mod <- cmdstanr::cmdstan_model(file)
+
+probsuccess.fit <- mod$sample(
+  data = standata,
+  seed = 123,
+  chains = 4,
+  iter_warmup = 200,
+  iter_sampling = 2000,
+  parallel_chains = 4,
+  refresh = 500
+)
+
+probsuccess.fit$save_object(file = "./probsuccess-fit-text.RDS")
+
+```
+
+```{r}
+probsuccess.fit <-readRDS("./probsuccess-fit-text.RDS")
+np <- bayesplot::nuts_params(probsuccess.fit)
+a_alg <- c("a_alg[1]",
+           "a_alg[2]",
+           "a_alg[3]",
+           "a_alg[4]",
+           "a_alg[5]",
+           "a_alg[6]",
+           "a_alg[7]",
+           "a_alg[8]",
+           "a_alg[9]",
+           "a_alg[10]",
+           "a_alg[11]",
+           "a_alg[12]",
+           "a_alg[13]")
+b_noise <- c("b_noise[1]",
+             "b_noise[2]",
+             "b_noise[3]",
+             "b_noise[4]",
+             "b_noise[5]",
+             "b_noise[6]",
+             "b_noise[7]",
+             "b_noise[8]",
+             "b_noise[9]",
+             "b_noise[10]",
+             "b_noise[11]",
+             "b_noise[12]",
+             "b_noise[13]")
+a_bm_norm <- c("a_bm_norm[1]",
+               "a_bm_norm[2]",
+               "a_bm_norm[3]",
+               "a_bm_norm[4]"
+               )
+
+csv_files <- probsuccess.fit$output_files()
+#probsuccess.fit <- as_cmdstan_fit(csv_files)
+draws_a <- posterior::as_draws(probsuccess.fit$draws(variables = a_alg, format = "draws_df"))
+draws_a <- draws_a[c(1000:1999, 3000:3999, 5000:5999, 7000:7999),]
+
+draws_b <- posterior::as_draws(probsuccess.fit$draws(variables = b_noise, format = "draws_df"))
+draws_b <- draws_b[c(1000:1999, 3000:3999, 5000:5999, 7000:7999),]
+
+draws_a_bm <- posterior::as_draws(probsuccess.fit$draws(variables = a_bm_norm, format = "draws_df"))
+draws_a_bm <- draws_a_bm[c(1000:1999, 3000:3999, 5000:5999, 7000:7999),]
+```
+Another diagnosis is to look at the Rhat. If Rhat is greater than 1.05 it indicates a divergence in the chains (they did not mix well). The table below shows a summary of the sampling.
+```{r}
+summary_probsuccess.fit <- probsuccess.fit$summary(variables = a_alg) %>%
+  dplyr::select(-mean, -median,-sd,-mad,-q5,-q95 )%>% 
+  kable(
+      "latex", 
+      table.envir = 'table',
+      caption='Diagnostics for the posterior effects (text data)', 
+      booktabs=T,
+      label='tab:diagnostics-text-probsuccess',
+      format.args = list(scientific = FALSE), 
+      digits = 3,
+      linesep = "") %>% 
+  kable_styling(latex_options = c("hold_position"),
+                full_width = F) %>% 
+  readr::write_lines('diagnostics-probsuccess-text.tex')
+```
+
+Here we are expimenting to compute the HPDintervals
+```{r}
+hpdi <- coda::HPDinterval(coda::as.mcmc(t(as.data.frame(probsuccess.fit$summary(variables = c(a_alg,b_noise,a_bm_norm))[6:7]))))
+df <- tibble::rownames_to_column(as.data.frame(hpdi), "Parameter")
+Mean <- c(probsuccess.fit$summary(variables = c(a_alg,b_noise,a_bm_norm))$mean)
+df.hpdi <- mutate(df,
+                 Mean=Mean,
+                 Parameter=probsuccess.fit$summary(variables = c(a_alg,b_noise,a_bm_norm))$variable) %>%
+  rename(HPDI.lower=lower,
+         HPDI.higher=upper,
+         Mean = Mean)
+hpdi <- df.hpdi
+hpdi_oddsratio <- df.hpdi
+hpdi_oddsratio$Mean <- exp(df.hpdi$Mean)
+hpdi_oddsratio$HPDI.lower <- exp(df.hpdi$HPDI.lower)
+hpdi_oddsratio$HPDI.higher <- exp(df.hpdi$HPDI.higher)
+```
+
+Produce tables.
+```{r}
+rename_pars <- c(
+  paste(rep('a_',length(algorithms)),algorithms, sep = ""),
+  paste(rep('b_',length(algorithms)),algorithms, sep = ""))
+
+renamepars <- rename_pars
+pars <- c(a_alg, b_noise)
+stanfit_summary <- as_tibble(probsuccess.fit$summary(variables = c(a_alg,b_noise)), rownames="Parameter")
+t1 <- stanfit_summary %>%
+  dplyr::filter(Parameter %in% pars) %>%
+  select(Parameter)
+t2 <- hpdi %>%
+  dplyr::filter(Parameter %in% pars)
+t <-left_join(x=t2, y=t1, by=c("Parameter")) %>%
+  dplyr::select(Parameter,Mean, everything()) %>%
+  dplyr::mutate(Parameter=renamepars)
+tt<- t %>% 
+  mutate('OR HPD low' = exp(HPDI.lower),
+         'OR Mean' = exp(Mean),
+         'OR HPD high' = exp(HPDI.higher))
+colnames(tt) <- c("Parameter", "Mean", "HPD low", "HPD high",'OR HPD low','OR Mean','OR HPD high')
+
+ saveRDS(tt,'./probsuccess-par-table-text.RDS')
+```
+
+Create table for the ODDs ratios
+```{r}
+tt <-readRDS('./probsuccess-par-table-text.RDS')
+tt[,c(1,6)] %>%
+kable(
+        "latex", 
+        table.envir = 'table',
+        caption='Odds ratios for fixed effects and noise parameters (text data)', 
+        booktabs=T,
+        label='summarystatisticstable-OR-text',
+        format.args = list(scientific = FALSE), 
+        digits = 3,
+        linesep = "") %>% 
+    kable_styling(latex_options = c("hold_position"),
+                  full_width = F) %>% 
+    readr::write_lines('summarystatisticstable-OR-text.tex')
+```
+
+Statistical Analysis
+```{r}
+p_trace <- bayesplot::mcmc_trace(draws_a, pars = a_alg)
+png("traceplots-probsuccess-text.png")
+p_trace
+```
+
+Scatterplots for MCMC
+```{r}
+# p_mcmc_scatter <- bayesplot::mcmc_scatter(probsuccess.fit$draws(variables=c("a_alg[1]","a_alg[2]"),format = "draws_df"))
+# p_mcmc_scatter
+```
+
+```{r}
+# p_mcmc_intervals<-bayesplot::mcmc_intervals(draws_a) +
+#   scale_y_discrete(labels=algorithms)+
+#   labs(x="Estimate",
+#        y="Algorithm",
+#        title="HPD Intervals for the parameters")
+# png("strenght-text.png")
+# p_mcmc_intervals
+```
+ Sample from the posterior
+```{r}
+y <- standata$y
+y_rep <- posterior::as_draws(probsuccess.fit$draws(variables = "y_rep", format = "draws_df"))
+y_rep <- y_rep[,1:length(y)]
+
+y_sim <- posterior::as_draws(probsuccess.fit$draws(variables = "y_sim", format = "draws_df"))
+y_sim <- y_rep[,1:length(y)]
+```
+Kernel density plots
+```{r}
+# p_dense_overlay <- bayesplot::ppc_dens_overlay(y,as.matrix(y_rep))
+# png("dense_overlay-text.png")
+```
+
+
+Histograms of skew(y_rep)
+```{r}
+# p_bars_stat <- bayesplot::ppc_stat(y, as.matrix(y_rep), binwidth=0.005)
+# png("stat-text.png")
+# p_bars_stat
+```
+
+```{r}
+# p_areas <- bayesplot::mcmc_areas(draws_a, prob=0.8)
+# png("posterior-parameters-areas.png")
+# p_areas
+```
+
+```{r}
+p_bars_stat_grouped <- bayesplot::ppc_stat_grouped(y=y, yrep=as.matrix(y_rep), group = dataset$algorithm, binwidth = 0.005)
+png("posterior-parameters-grouped-text-probsuccess.png")
+p_bars_stat_grouped
+```
+Posterior Predictive Check
+```{r}
+p_bars_grouped <- bayesplot::ppc_stat_grouped(y=y, yrep=as.matrix(y_rep), group=dataset$algorithm, binwidth = 0.005)
+#pdf('posterior-predictive-check-bars_grouped-aggregated.pdf')
+png("posterior-parameters-grouped-probsuccess-text.png")
+p_bars_grouped
+```
+Prior Predictive Check
+```{r}
+p_bars_grouped_prior <- bayesplot::ppc_stat_grouped(y=y, yrep=as.matrix(y_sim), group=dataset$algorithm, binwidth = 0.005)
+#pdf('posterior-predictive-check-bars_grouped-aggregated.pdf')
+png("prior-parameters-grouped-probsuccess-text.png")
+p_bars_grouped_prior
+```
+
+```{r}
+a_posterior <- hpdi$Mean[1:13]
+b_noise_posterior <- hpdi$Mean[14:26]
+a_bm_posterior <- hpdi$Mean[27:38]
+
+N_total = nrow(dataset)
+p <- rep(1,N_total)
+algorithm_ID <- rep(1,N_total)
+dataset_ID <- rep(1,N_total)
+
+algorithm <-  rep(1,N_total)
+dataset_name <-  rep(1,N_total)
+noise <- rep(1,N_total)
+task <- rep(1,N_total)
+
+for (j in 1:N_total) {
+  p[j] <- inv.logit(a_posterior[dataset$algorithmID[j]]+a_bm_posterior[dataset$datasetID[j]]+b_noise_posterior[dataset$algorithmID[j]]*dataset$SD[j])
+  algorithm[j] <- dataset$algorithm[j]
+  dataset_name[j] <- dataset$dataset[j]
+  
+  algorithm_ID[j] <- dataset$algorithmID[j]
+  dataset_ID[j] <- dataset$datasetID[j]
+  noise[j] <- dataset$SD[j]
+}
+
+probability <- tibble(p=as.numeric(p),algorithm,algorithm_ID,dataset_name,dataset_ID,noise) %>% 
+  select(p,algorithm,noise) %>%
+  group_by(algorithm, noise)
+
+summary_prob <- probability %>%
+  summarize(avg_prob = 100*mean(p, na.rm = TRUE))
+
+summary_prob_0 <- summary_prob %>%
+  dplyr::filter(noise==0) %>%
+  dplyr::select(-noise) %>%
+  dplyr::rename("SD=0 (text)"=avg_prob)
+
+summary_prob_1 <- summary_prob %>%
+  dplyr::filter(noise==3) %>%
+  dplyr::select(-noise) %>%
+  dplyr::rename("SD=1 (text)"=avg_prob)
+
+summary_probability <- dplyr::left_join(summary_prob_0,summary_prob_1,by=join_by(algorithm))
+saveRDS(summary_probability,'./probability-of-success-text.RDS')
+
+```
+
+
+
+
